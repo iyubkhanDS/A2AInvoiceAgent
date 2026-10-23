@@ -1,7 +1,7 @@
 import json
 import os
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -24,6 +24,17 @@ class InvoicePackage(BaseModel):
     amount: float
     currency: str
     evidence_text: str
+
+class MessageSendPayload(BaseModel):
+    jsonrpc: Optional[str] = "2.0"
+    method: Optional[str] = None
+    params: Optional[Dict[str, Any]] = None
+    id: Optional[Any] = None
+    invoice_id: Optional[str] = None
+    vendor: Optional[str] = None
+    amount: Optional[float] = None
+    currency: Optional[str] = None
+    evidence_text: Optional[str] = None
 
 @app.get("/")
 async def root():
@@ -56,16 +67,13 @@ async def check_invoice(payload: InvoicePackage):
     state = load_state()
     MAX_CHECKS = 10
     
-    # Reserve the final check slot explicitly for Save (10 checks max per 24 hours)
     if state["checks_used"] >= MAX_CHECKS - 1:
         raise HTTPException(status_code=400, detail="Check limit reached. Last check reserved for Save.")
     
     state["checks_used"] += 1
     save_state(state)
 
-    # A payment for a different invoice is not a duplicate
     is_duplicate = payload.invoice_id in state["processed_invoices"]
-    
     action = "reject" if is_duplicate else "approve"
     evidence = payload.evidence_text[:150]
 
@@ -89,7 +97,6 @@ async def save_action(payload: Dict[str, Any]):
     invoice_id = payload.get("invoice_id")
     action = payload.get("action")
 
-    # Save task state so retries cannot repeat payments
     state["processed_invoices"][invoice_id] = {
         "action": action,
         "timestamp": datetime.now(timezone.utc).isoformat()
@@ -100,3 +107,33 @@ async def save_action(payload: Dict[str, Any]):
         "status": "success",
         "saved_record": state["processed_invoices"][invoice_id]
     }
+
+@app.post("/a2a/message:send")
+async def message_send(payload: Dict[str, Any]):
+    # Handles A2A Protocol message:send calls or JSON-RPC format wrappers
+    params = payload.get("params", payload)
+    invoice_id = params.get("invoice_id", "INV-UNKNOWN")
+    vendor = params.get("vendor", "")
+    amount = params.get("amount", 0.0)
+    currency = params.get("currency", "USD")
+    evidence_text = params.get("evidence_text", "")
+
+    state = load_state()
+    is_duplicate = invoice_id in state["processed_invoices"]
+    action = "reject" if is_duplicate else "approve"
+
+    result = {
+        "invoice_id": invoice_id,
+        "action": action,
+        "evidence_cited": evidence_text[:150],
+        "is_duplicate": is_duplicate
+    }
+
+    if "jsonrpc" in payload or "id" in payload:
+        return {
+            "jsonrpc": "2.0",
+            "result": result,
+            "id": payload.get("id")
+        }
+
+    return result

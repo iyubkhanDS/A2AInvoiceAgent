@@ -2,7 +2,7 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -13,18 +13,33 @@ def load_state() -> Dict[str, Any]:
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
             return json.load(f)
-    return {"checks_used": 0, "processed_invoices": {}}
+    return {"checks_used": 0, "processed_invoices": {}, "tasks": {}}
 
 def save_state(state: Dict[str, Any]):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-class InvoicePackage(BaseModel):
-    invoice_id: str
-    vendor: str
-    amount: float
-    currency: str
-    evidence_text: str
+# Authentication Dependency
+def verify_bearer_token(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Bearer token.")
+    token = authorization.split(" ")[1]
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid token.")
+    return token
+
+# Protocol & Media Type Validation Dependency
+async def validate_a2a_request(request: Request, a2a_version: Optional[str] = Header(None, alias="A2A-Version")):
+    # Validate Media Type for POST requests
+    if request.method == "POST":
+        content_type = request.headers.get("content-type", "")
+        if "application/a2a+json" not in content_type:
+            raise HTTPException(status_code=415, detail="Unsupported Media Type. Must be application/a2a+json.")
+    
+    # Validate Protocol Version if provided (support "1.0")
+    if a2a_version and a2a_version not in ["1.0", "1.1"]:
+        raise HTTPException(status_code=400, detail="Unsupported A2A version.")
+    return True
 
 @app.get("/")
 async def root():
@@ -38,6 +53,11 @@ async def agent_card():
         "version": "1.0.0",
         "protocolVersion": "1.0",
         "url": "https://a2a-invoice-agent-f0r3.onrender.com/a2a/",
+        "modes": ["sync", "async"],
+        "capabilities": {
+            "streaming": False,
+            "pushNotifications": False
+        },
         "skills": [
             {
                 "id": "invoice_processing",
@@ -53,8 +73,32 @@ async def agent_card():
 async def agent_json_alias():
     return await agent_card()
 
-@app.post("/a2a/check")
-async def check_invoice(payload: InvoicePackage):
+@app.get("/tasks", dependencies=[Depends(verify_bearer_token)])
+async def list_tasks():
+    state = load_state()
+    tasks_list = list(state.get("tasks", {}).values())
+    return JSONResponse(content={"tasks": tasks_list}, media_type="application/a2a+json")
+
+@app.get("/tasks/{task_id}", dependencies=[Depends(verify_bearer_token)])
+async def get_task(task_id: str):
+    state = load_state()
+    task = state.get("tasks", {}).get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return JSONResponse(content=task, media_type="application/a2a+json")
+
+@app.post("/tasks/{task_id}/cancel", dependencies=[Depends(verify_bearer_token)])
+async def cancel_task(task_id: str):
+    state = load_state()
+    if task_id not in state.get("tasks", {}):
+        raise HTTPException(status_code=404, detail="Task not found.")
+    state["tasks"][task_id]["status"] = "cancelled"
+    save_state(state)
+    return JSONResponse(content={"status": "cancelled", "task_id": task_id}, media_type="application/a2a+json")
+
+@app.post("/a2a/check", dependencies=[Depends(verify_bearer_token), Depends(validate_a2a_request)])
+async def check_invoice(request: Request):
+    payload = await request.json()
     state = load_state()
     MAX_CHECKS = 10
     
@@ -64,12 +108,13 @@ async def check_invoice(payload: InvoicePackage):
     state["checks_used"] += 1
     save_state(state)
 
-    is_duplicate = payload.invoice_id in state["processed_invoices"]
+    invoice_id = payload.get("invoice_id", "UNKNOWN")
+    is_duplicate = invoice_id in state["processed_invoices"]
     action = "reject" if is_duplicate else "approve"
-    evidence = payload.evidence_text[:150]
+    evidence = payload.get("evidence_text", "")[:150]
 
     result = {
-        "invoice_id": payload.invoice_id,
+        "invoice_id": invoice_id,
         "action": action,
         "evidence_cited": evidence,
         "is_duplicate": is_duplicate,
@@ -77,13 +122,14 @@ async def check_invoice(payload: InvoicePackage):
     }
     return JSONResponse(content=result, media_type="application/a2a+json")
 
-@app.post("/a2a/save")
-async def save_action(payload: Dict[str, Any]):
+@app.post("/a2a/save", dependencies=[Depends(verify_bearer_token), Depends(validate_a2a_request)])
+async def save_action(request: Request):
+    payload = await request.json()
     state = load_state()
     MAX_CHECKS = 10
     
     if state["checks_used"] >= MAX_CHECKS:
-        raise HTTPException(status_code=400, detail="No checks left for saving (0 marks).")
+        raise HTTPException(status_code=400, detail="No checks left for saving.")
 
     state["checks_used"] += 1
     invoice_id = payload.get("invoice_id")
@@ -93,16 +139,30 @@ async def save_action(payload: Dict[str, Any]):
         "action": action,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
+    
+    task_id = payload.get("task_id", f"task-{invoice_id}")
+    state["tasks"][task_id] = {
+        "task_id": task_id,
+        "status": "completed",
+        "invoice_id": invoice_id,
+        "action": action,
+        "receipt": {
+            "binding": invoice_id,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    }
     save_state(state)
 
     result = {
         "status": "success",
+        "task_id": task_id,
         "saved_record": state["processed_invoices"][invoice_id]
     }
     return JSONResponse(content=result, media_type="application/a2a+json")
 
-@app.post("/a2a/message:send")
-async def message_send(payload: Dict[str, Any]):
+@app.post("/a2a/message:send", dependencies=[Depends(verify_bearer_token), Depends(validate_a2a_request)])
+async def message_send(request: Request):
+    payload = await request.json()
     params = payload.get("params", payload)
     invoice_id = params.get("invoice_id", "INV-UNKNOWN")
     evidence_text = params.get("evidence_text", "")

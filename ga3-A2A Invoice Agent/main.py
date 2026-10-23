@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="A2A Invoice Agent", version="1.0.0")
@@ -25,24 +26,13 @@ class InvoicePackage(BaseModel):
     currency: str
     evidence_text: str
 
-class MessageSendPayload(BaseModel):
-    jsonrpc: Optional[str] = "2.0"
-    method: Optional[str] = None
-    params: Optional[Dict[str, Any]] = None
-    id: Optional[Any] = None
-    invoice_id: Optional[str] = None
-    vendor: Optional[str] = None
-    amount: Optional[float] = None
-    currency: Optional[str] = None
-    evidence_text: Optional[str] = None
-
 @app.get("/")
 async def root():
     return {"message": "A2A Invoice Agent is running successfully!"}
 
 @app.get("/.well-known/agent-card.json")
 async def agent_card():
-    return {
+    card = {
         "name": "a2a-invoice-agent",
         "description": "An autonomous A2A invoice agent that reads invoice packages, evaluates approval rules and duplicate payments, and records safe task state.",
         "version": "1.0.0",
@@ -57,6 +47,7 @@ async def agent_card():
             }
         ]
     }
+    return JSONResponse(content=card, media_type="application/a2a+json")
 
 @app.get("/.well-known/agent.json")
 async def agent_json_alias():
@@ -77,13 +68,14 @@ async def check_invoice(payload: InvoicePackage):
     action = "reject" if is_duplicate else "approve"
     evidence = payload.evidence_text[:150]
 
-    return {
+    result = {
         "invoice_id": payload.invoice_id,
         "action": action,
         "evidence_cited": evidence,
         "is_duplicate": is_duplicate,
         "checks_remaining": MAX_CHECKS - state["checks_used"]
     }
+    return JSONResponse(content=result, media_type="application/a2a+json")
 
 @app.post("/a2a/save")
 async def save_action(payload: Dict[str, Any]):
@@ -103,19 +95,16 @@ async def save_action(payload: Dict[str, Any]):
     }
     save_state(state)
 
-    return {
+    result = {
         "status": "success",
         "saved_record": state["processed_invoices"][invoice_id]
     }
+    return JSONResponse(content=result, media_type="application/a2a+json")
 
 @app.post("/a2a/message:send")
 async def message_send(payload: Dict[str, Any]):
-    # Handles A2A Protocol message:send calls or JSON-RPC format wrappers
     params = payload.get("params", payload)
     invoice_id = params.get("invoice_id", "INV-UNKNOWN")
-    vendor = params.get("vendor", "")
-    amount = params.get("amount", 0.0)
-    currency = params.get("currency", "USD")
     evidence_text = params.get("evidence_text", "")
 
     state = load_state()
@@ -130,10 +119,12 @@ async def message_send(payload: Dict[str, Any]):
     }
 
     if "jsonrpc" in payload or "id" in payload:
-        return {
+        response_body = {
             "jsonrpc": "2.0",
             "result": result,
             "id": payload.get("id")
         }
+    else:
+        response_body = result
 
-    return result
+    return JSONResponse(content=response_body, media_type="application/a2a+json")

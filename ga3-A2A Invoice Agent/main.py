@@ -25,12 +25,38 @@ class InvoicePackage(BaseModel):
     currency: str
     evidence_text: str
 
+@app.get("/")
+async def root():
+    return {"message": "A2A Invoice Agent is running successfully!"}
+
+@app.get("/.well-known/agent-card.json")
+async def agent_card():
+    return {
+        "name": "a2a-invoice-agent",
+        "description": "An autonomous A2A invoice agent that reads invoice packages, evaluates approval rules and duplicate payments, and records safe task state.",
+        "version": "1.0.0",
+        "protocolVersion": "1.0",
+        "url": "https://a2a-invoice-agent-f0r3.onrender.com/a2a/",
+        "skills": [
+            {
+                "id": "invoice_processing",
+                "name": "Invoice Processing",
+                "description": "Read invoice packages, choose business actions with supporting evidence, check approval limits, and prevent duplicate payments.",
+                "tags": ["invoice", "accounting", "payment"]
+            }
+        ]
+    }
+
+@app.get("/.well-known/agent.json")
+async def agent_json_alias():
+    return await agent_card()
+
 @app.post("/a2a/check")
 async def check_invoice(payload: InvoicePackage):
     state = load_state()
     MAX_CHECKS = 10
     
-    # Reserve the final check slot explicitly for Save
+    # Reserve the final check slot explicitly for Save (10 checks max per 24 hours)
     if state["checks_used"] >= MAX_CHECKS - 1:
         raise HTTPException(status_code=400, detail="Check limit reached. Last check reserved for Save.")
     

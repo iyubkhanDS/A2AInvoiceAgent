@@ -50,7 +50,7 @@ async def agent_card():
         "description": "An autonomous A2A invoice agent that reads invoice packages, evaluates approval rules and duplicate payments, and records safe task state.",
         "version": "1.0.0",
         "protocolVersion": "1.0",
-        "url": "https://a2a-invoice-agent-f0r3.onrender.com/",
+        "url": "https://a2a-invoice-agent-f0r3.onrender.com/a2a/",
         "modes": ["sync", "async"],
         "capabilities": {
             "streaming": False,

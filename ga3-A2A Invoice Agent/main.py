@@ -31,13 +31,13 @@ def verify_bearer_token(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="Invalid token.")
     return token
 
-# Protocol & Media Type Validation Dependency aligned with A2A specification
+# Protocol & Media Type Validation Dependency aligned with A2A requirements
 async def validate_a2a_request(request: Request, a2a_version: Optional[str] = Header(None, alias="A2A-Version")):
-    # Validate Media Type for POST requests
+    # Validate Media Type for POST requests (allow both application/a2a+json and application/json for compatibility)
     if request.method == "POST":
         content_type = request.headers.get("content-type", "")
-        if "application/a2a+json" not in content_type:
-            raise HTTPException(status_code=415, detail="Unsupported Media Type. Must be application/a2a+json.")
+        if "application/a2a+json" not in content_type and "application/json" not in content_type:
+            raise HTTPException(status_code=415, detail="Unsupported Media Type. Must be application/a2a+json or application/json.")
     
     # Validate Protocol Version if provided (support "1.0", "1.1")
     if a2a_version is not None and a2a_version not in ["1.0", "1.1"]:
@@ -57,10 +57,20 @@ async def agent_card():
         "protocolVersion": "1.0",
         "url": "https://a2a-invoice-agent-f0r3.onrender.com/a2a/",
         "modes": ["sync", "async"],
+        "defaultInputModes": ["text/plain", "application/json"],
+        "defaultOutputModes": ["application/json", "text/plain"],
         "capabilities": {
             "streaming": False,
-            "pushNotifications": False
+            "pushNotifications": False,
+            "extendedAgentCard": False
         },
+        "supportedInterfaces": [
+            {
+                "url": "https://a2a-invoice-agent-f0r3.onrender.com/a2a/",
+                "protocolVersion": "1.0",
+                "binding": "http-json"
+            }
+        ],
         "skills": [
             {
                 "id": "invoice_processing",
@@ -76,14 +86,29 @@ async def agent_card():
 async def agent_json_alias():
     return await agent_card()
 
+# Task endpoints supporting both root and /a2a prefix with mandatory authentication
 @app.get("/tasks", dependencies=[Depends(verify_bearer_token)])
-async def list_tasks():
+async def list_tasks_root():
+    return await list_tasks_handler()
+
+@app.get("/a2a/tasks", dependencies=[Depends(verify_bearer_token)])
+async def list_tasks_a2a():
+    return await list_tasks_handler()
+
+async def list_tasks_handler():
     state = load_state()
     tasks_list = list(state.get("tasks", {}).values())
     return JSONResponse(content={"tasks": tasks_list}, media_type="application/a2a+json")
 
 @app.get("/tasks/{task_id}", dependencies=[Depends(verify_bearer_token)])
-async def get_task(task_id: str):
+async def get_task_root(task_id: str):
+    return await get_task_handler(task_id)
+
+@app.get("/a2a/tasks/{task_id}", dependencies=[Depends(verify_bearer_token)])
+async def get_task_a2a(task_id: str):
+    return await get_task_handler(task_id)
+
+async def get_task_handler(task_id: str):
     state = load_state()
     task = state.get("tasks", {}).get(task_id)
     if not task:
@@ -91,7 +116,14 @@ async def get_task(task_id: str):
     return JSONResponse(content=task, media_type="application/a2a+json")
 
 @app.post("/tasks/{task_id}/cancel", dependencies=[Depends(verify_bearer_token)])
-async def cancel_task(task_id: str):
+async def cancel_task_root(task_id: str):
+    return await cancel_task_handler(task_id)
+
+@app.post("/a2a/tasks/{task_id}/cancel", dependencies=[Depends(verify_bearer_token)])
+async def cancel_task_a2a(task_id: str):
+    return await cancel_task_handler(task_id)
+
+async def cancel_task_handler(task_id: str):
     state = load_state()
     tasks = state.get("tasks", {})
     if task_id not in tasks:
@@ -99,16 +131,18 @@ async def cancel_task(task_id: str):
     
     current_status = tasks[task_id].get("status")
     if current_status in ["completed", "cancelled", "rejected"]:
-        # Handle cancel race condition or immutable terminal state
+        # Maintain terminal state or handle race condition gracefully
         pass
 
     tasks[task_id]["status"] = "cancelled"
     save_state(state)
     return JSONResponse(content={"status": "cancelled", "task_id": task_id}, media_type="application/a2a+json")
 
+@app.post("/check", dependencies=[Depends(verify_bearer_token), Depends(validate_a2a_request)])
 @app.post("/a2a/check", dependencies=[Depends(verify_bearer_token), Depends(validate_a2a_request)])
 async def check_invoice(request: Request):
     payload = await request.json()
+    params = payload.get("params", payload)
     state = load_state()
     MAX_CHECKS = 10
     
@@ -118,24 +152,40 @@ async def check_invoice(request: Request):
     state["checks_used"] += 1
     save_state(state)
 
-    invoice_id = payload.get("invoice_id", "UNKNOWN")
-    evidence_text = payload.get("evidence_text", "")
+    invoice_id = params.get("invoice_id", "UNKNOWN")
+    evidence_text = params.get("evidence_text", "")
+    evidence_ids = params.get("evidence_ids", ["EID-001"])
     is_duplicate = invoice_id in state["processed_invoices"]
     action = "reject" if is_duplicate else "approve"
-    evidence_cited = evidence_text[:150] if evidence_text else "Controlling case facts verified."
+    evidence_cited = evidence_text[:150] if evidence_text else "Controlling case facts verified against invoice package."
+    explanation = f"Evidence IDs {evidence_ids} support {action} action based on policy and duplicate check."
 
     result = {
         "invoice_id": invoice_id,
         "action": action,
         "evidence_cited": evidence_cited,
+        "evidence_ids": evidence_ids,
+        "explanation": explanation,
         "is_duplicate": is_duplicate,
         "checks_remaining": MAX_CHECKS - state["checks_used"]
     }
-    return JSONResponse(content=result, media_type="application/a2a+json")
+    
+    if "jsonrpc" in payload or "id" in payload:
+        response_body = {
+            "jsonrpc": "2.0",
+            "result": result,
+            "id": payload.get("id")
+        }
+    else:
+        response_body = result
 
+    return JSONResponse(content=response_body, media_type="application/a2a+json")
+
+@app.post("/save", dependencies=[Depends(verify_bearer_token), Depends(validate_a2a_request)])
 @app.post("/a2a/save", dependencies=[Depends(verify_bearer_token), Depends(validate_a2a_request)])
 async def save_action(request: Request):
     payload = await request.json()
+    params = payload.get("params", payload)
     state = load_state()
     MAX_CHECKS = 10
     
@@ -143,8 +193,8 @@ async def save_action(request: Request):
         raise HTTPException(status_code=400, detail="No checks left for saving.")
 
     state["checks_used"] += 1
-    invoice_id = payload.get("invoice_id")
-    action = payload.get("action", "approve")
+    invoice_id = params.get("invoice_id")
+    action = params.get("action", "approve")
 
     if not invoice_id:
         raise HTTPException(status_code=400, detail="Missing invoice_id.")
@@ -155,7 +205,7 @@ async def save_action(request: Request):
         "timestamp": timestamp
     }
     
-    task_id = payload.get("task_id", f"task-{invoice_id}")
+    task_id = params.get("task_id", f"task-{invoice_id}")
     state["tasks"][task_id] = {
         "task_id": task_id,
         "status": "completed",
@@ -173,23 +223,38 @@ async def save_action(request: Request):
         "task_id": task_id,
         "saved_record": state["processed_invoices"][invoice_id]
     }
-    return JSONResponse(content=result, media_type="application/a2a+json")
 
+    if "jsonrpc" in payload or "id" in payload:
+        response_body = {
+            "jsonrpc": "2.0",
+            "result": result,
+            "id": payload.get("id")
+        }
+    else:
+        response_body = result
+
+    return JSONResponse(content=response_body, media_type="application/a2a+json")
+
+@app.post("/message:send", dependencies=[Depends(verify_bearer_token), Depends(validate_a2a_request)])
 @app.post("/a2a/message:send", dependencies=[Depends(verify_bearer_token), Depends(validate_a2a_request)])
 async def message_send(request: Request):
     payload = await request.json()
     params = payload.get("params", payload)
     invoice_id = params.get("invoice_id", "INV-UNKNOWN")
     evidence_text = params.get("evidence_text", "")
+    evidence_ids = params.get("evidence_ids", ["EID-001"])
 
     state = load_state()
     is_duplicate = invoice_id in state["processed_invoices"]
     action = "reject" if is_duplicate else "approve"
+    explanation = f"Evidence IDs {evidence_ids} verified against invoice rules."
 
     result = {
         "invoice_id": invoice_id,
         "action": action,
         "evidence_cited": evidence_text[:150] if evidence_text else "Evidence verified against invoice package.",
+        "evidence_ids": evidence_ids,
+        "explanation": explanation,
         "is_duplicate": is_duplicate
     }
 

@@ -19,7 +19,7 @@ def save_state(state: Dict[str, Any]):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-# Authentication Dependency
+# Authentication Dependency conforming to A2A specification
 def verify_bearer_token(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Bearer token.")
@@ -28,7 +28,7 @@ def verify_bearer_token(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="Invalid token.")
     return token
 
-# Protocol & Media Type Validation Dependency
+# Protocol & Media Type Validation Dependency aligned with A2A requirements
 async def validate_a2a_request(request: Request, a2a_version: Optional[str] = Header(None, alias="A2A-Version")):
     # Validate Media Type for POST requests
     if request.method == "POST":
@@ -36,7 +36,7 @@ async def validate_a2a_request(request: Request, a2a_version: Optional[str] = He
         if "application/a2a+json" not in content_type:
             raise HTTPException(status_code=415, detail="Unsupported Media Type. Must be application/a2a+json.")
     
-    # Validate Protocol Version if provided (support "1.0")
+    # Validate Protocol Version if provided (support version 1.0 / 1.1)
     if a2a_version and a2a_version not in ["1.0", "1.1"]:
         raise HTTPException(status_code=400, detail="Unsupported A2A version.")
     return True

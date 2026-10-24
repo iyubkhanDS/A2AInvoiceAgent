@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, Header, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 app = FastAPI(title="A2A Invoice Agent", version="1.0.0")
 STATE_FILE = "agent_state.json"
@@ -22,7 +21,6 @@ def save_state(state: Dict[str, Any]):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-# Authentication Dependency: strict Bearer token requirement
 def verify_bearer_token(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Bearer token.")
@@ -31,15 +29,12 @@ def verify_bearer_token(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="Invalid token.")
     return token
 
-# Protocol & Media Type Validation Dependency aligned with A2A requirements
 async def validate_a2a_request(request: Request, a2a_version: Optional[str] = Header(None, alias="A2A-Version")):
-    # Validate Media Type for POST requests (allow both application/a2a+json and application/json for compatibility)
     if request.method == "POST":
         content_type = request.headers.get("content-type", "")
-        if "application/a2a+json" not in content_type and "application/json" not in content_type:
-            raise HTTPException(status_code=415, detail="Unsupported Media Type. Must be application/a2a+json or application/json.")
+        if "application/a2a+json" not in content_type:
+            raise HTTPException(status_code=415, detail="Unsupported Media Type. Must be application/a2a+json.")
     
-    # Validate Protocol Version if provided (support "1.0", "1.1")
     if a2a_version is not None and a2a_version not in ["1.0", "1.1"]:
         raise HTTPException(status_code=400, detail="Unsupported A2A version.")
     return True
@@ -55,22 +50,12 @@ async def agent_card():
         "description": "An autonomous A2A invoice agent that reads invoice packages, evaluates approval rules and duplicate payments, and records safe task state.",
         "version": "1.0.0",
         "protocolVersion": "1.0",
-        "url": "https://a2a-invoice-agent-f0r3.onrender.com/a2a/",
+        "url": "https://a2a-invoice-agent-f0r3.onrender.com/",
         "modes": ["sync", "async"],
-        "defaultInputModes": ["text/plain", "application/json"],
-        "defaultOutputModes": ["application/json", "text/plain"],
         "capabilities": {
             "streaming": False,
-            "pushNotifications": False,
-            "extendedAgentCard": False
+            "pushNotifications": False
         },
-        "supportedInterfaces": [
-            {
-                "url": "https://a2a-invoice-agent-f0r3.onrender.com/a2a/",
-                "protocolVersion": "1.0",
-                "binding": "http-json"
-            }
-        ],
         "skills": [
             {
                 "id": "invoice_processing",
@@ -86,7 +71,6 @@ async def agent_card():
 async def agent_json_alias():
     return await agent_card()
 
-# Task endpoints supporting both root and /a2a prefix with mandatory authentication
 @app.get("/tasks", dependencies=[Depends(verify_bearer_token)])
 async def list_tasks_root():
     return await list_tasks_handler()
@@ -129,11 +113,6 @@ async def cancel_task_handler(task_id: str):
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Task not found.")
     
-    current_status = tasks[task_id].get("status")
-    if current_status in ["completed", "cancelled", "rejected"]:
-        # Maintain terminal state or handle race condition gracefully
-        pass
-
     tasks[task_id]["status"] = "cancelled"
     save_state(state)
     return JSONResponse(content={"status": "cancelled", "task_id": task_id}, media_type="application/a2a+json")
